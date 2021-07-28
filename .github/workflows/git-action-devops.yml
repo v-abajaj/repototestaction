@@ -18,5 +18,5 @@ jobs:
           uses: Azure/pipelines@v1
           with:
             azure-devops-project-url: https://dev.azure.com/v-abajaj/testProject
-            azure-pipeline-name: 'TestForOpsPipeline'
+            azure-pipeline-name: 'v-abajaj.repototestaction (1)'
             azure-devops-token: ${{ secrets.AZURE_DEVOPS_TOKEN }}
