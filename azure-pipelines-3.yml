@@ -9,7 +9,7 @@ stages:
             displayName: 'Update ServiceNow Change Request'
             inputs:
               ServiceNowConnection: 'ServicenowConnection'
-              NewStatus: 'Assess'
+              NewStatus: 'New'
               WorkNotes: 'sample notes'
               ChangeRequestNumber: 'CHG0030478'
               otherParameters: '{"u_hello":"hello"}'
