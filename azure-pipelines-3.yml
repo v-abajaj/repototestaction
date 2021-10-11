@@ -6,11 +6,11 @@ stages:
       - job: UpdateChangeRequest
         steps:
           - task: UpdateServiceNowChangeRequest@2
-            displayName: 'Update ServiceNow Change Request'
+            displayName: 'Close ServiceNow change [Successfull]'
             inputs:
               ServiceNowConnection: 'ServicenowConnection'
-              NewStatus: 'New'
+              NewStatus: 7
               WorkNotes: 'sample notes'
               ChangeRequestNumber: 'CHG0030478'
-              otherParameters: '{"u_hello":"hello"}'
+              otherParameters: '{"u_close_notes": "succeeded" }'
 pool: server
