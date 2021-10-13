@@ -12,7 +12,7 @@ stages:
               NewStatus: 'Assess'
               WorkNotes: 'sample notes'
               otherParameters: '{"u_close_notes": "succeeded" }'
-  - stage: Stage1
+  - stage: Stage2
     jobs:
       - deployment: DeployLatest
         environment: test
