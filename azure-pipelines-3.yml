@@ -11,6 +11,5 @@ stages:
               ServiceNowConnection: 'ServicenowConnection'
               NewStatus: 7
               WorkNotes: 'sample notes'
-              ChangeRequestNumber: 'CHG0030478'
               otherParameters: '{"u_close_notes": "succeeded" }'
 pool: server
