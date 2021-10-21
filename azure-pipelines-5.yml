@@ -18,10 +18,6 @@ stages:
     - script: echo "Sandeep"
   - job: UpdateChangeRequest
     steps:
-    - task: UpdateServiceNowChangeRequest@2
-      displayName: 'Update ServiceNow Change Request'
+    - task: Delay@1
       inputs:
-        ServiceNowConnection: 'Service Now Beta'
-        NewStatus: 'Assess'
-        WorkNotes: 'Sample Work Notes'
-        otherParameters: '{"u_hello": "hello"}'
+        delayForMinutes: '2'
