@@ -1,0 +1,27 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+- main
+
+stages:
+- stage: install_configure_agent
+  pool:
+    name: Default
+  jobs:
+  - deployment: 'newchangerequest'
+    environment: test
+  - job: s3_list
+    steps:
+    - script: echo "Sandeep"
+  - job: UpdateChangeRequest
+    steps:
+    - task: UpdateServiceNowChangeRequest@2
+      displayName: 'Update ServiceNow Change Request'
+      inputs:
+        ServiceNowConnection: 'Service Now Beta'
+        NewStatus: 'Assess'
+        WorkNotes: 'Sample Work Notes'
+        otherParameters: '{"u_hello": "hello"}'
