@@ -19,3 +19,4 @@ stages:
     - task: Delay@1
       inputs:
         delayForMinutes: '2'
+pool: server
