@@ -8,15 +8,14 @@ trigger:
 
 stages:
 - stage: install_configure_agent
+  pool: Default
   jobs:
   - deployment: 'newchangerequest'
     environment: test
   - job: s3_list
-    pool: Default
     steps:
     - script: echo "Sandeep"
   - job: UpdateChangeRequest
-    pool: server
     steps:
     - task: Delay@1
       inputs:
