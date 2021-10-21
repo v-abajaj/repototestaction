@@ -8,6 +8,8 @@ trigger:
 
 stages:
 - stage: install_configure_agent
+  pool:
+    name: Default
   jobs:
   - deployment: 'newchangerequest'
     environment: test
