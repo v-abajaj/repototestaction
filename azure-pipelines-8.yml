@@ -1,0 +1,982 @@
+# Enterprise Scale Pipeline Complete Deployment
+# Pipeline deployment of the entire Enterprise Scale Architecture (management groups, subscriptions, etc)
+
+name: $(BuildDefinitionName)_$(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+trigger: none
+
+pool: Default
+
+parameters:
+- name: VariableGroupSelection
+  displayName: Select Region
+  type: string
+  values:
+  - AustraliaEast
+  - EastUS2
+  - CanadaCentral
+  - UKSouth
+  - WestUS
+  - UAENorth
+  - SoutheastAsia
+
+variables:
+  - group: ES-General
+  - group: ES-${{ parameters.VariableGroupSelection }}
+
+jobs:
+# Management Groups
+- job: deploy_mgmtGroups
+  displayName: 'Deploy Management Groups'
+  steps:
+  - script: echo $(System.AccessToken) | az devops login
+    env:
+      AZURE_DEVOPS_CLI_PAT: $(System.AccessToken)
+    displayName: 'Login Azure DevOps Extension'
+  - script: az devops configure --defaults organization="$(System.CollectionUri)" project="$(System.TeamProject)" --use-git-aliases true
+    displayName: 'Set default Azure DevOps organization and project.'
+  - task: PowerShell@2
+    name: 'CreateVG'
+    displayName: 'Create Output Variable Group'
+    inputs:
+      targetType: 'inline'
+      script: |
+        $DateRev = "$(Build.BuildNumber)".Split("_")[2]
+
+        # Rename current Variable Group
+        Write-Host "Getting current variable group..."
+        $currentvg = az pipelines variable-group list --group-name $(OutputVariableGroupName) --only-show-errors | ConvertFrom-Json
+        If ($currentvg) {
+          Write-Host "Renaming current variable group to '$($currentvg.name)_Backup_$(Build.SourceBranchName)_$DateRev'"
+          az pipelines variable-group update --group-id $currentvg.id --name "$($currentvg.name)_Backup_$(Build.SourceBranchName)_$DateRev" --only-show-errors
+        } else {
+          Write-Host "No variable group with name '$(OutputVariableGroupName)' found."
+        }
+
+        # Create New Variable Group
+        Write-Host "Creating new variable group called '$(OutputVariableGroupName)'"
+        $variablegroup = az pipelines variable-group create --name $(OutputVariableGroupName) --variables "OutputsFrom=$(Build.BuildNumber)" --authorize true --only-show-errors | Convertfrom-Json
+        Write-Output "##vso[task.setvariable variable=VariableGroupID]$($variablegroup.id)"
+        Write-Output "##vso[task.setvariable variable=VariableGroupID;isOutput=true]$($variablegroup.id)"
+        Write-Output "Added VSTS variable 'VariableGroupID' with value '$($variablegroup.id)'"
+
+        # Output SourceDateRev for use in Deployment Names
+        Write-Output "##vso[task.setvariable variable=SourceDateRev]$(Build.SourceBranchName)-$DateRev"
+        Write-Output "##vso[task.setvariable variable=SourceDateRev;isOutput=true]$(Build.SourceBranchName)-$DateRev"
+        Write-Output "Added VSTS variable 'SourceDateRev' with value '$(Build.SourceBranchName)-$DateRev'"
+
+        # Primary Region Check
+        Write-Output "Deployment Region: $(AzureRegion)"
+        Write-Output "Main Region: $(MainRegion)"
+        If ($('$(AzureRegion)').Trim().ToUpper() -eq $('$(MainRegion)').Trim().ToUpper()) {
+            $PrimaryRegion = 'true'
+        } else {
+            $PrimaryRegion = 'false'
+        }
+        Write-Output "Primary Region: $primaryRegion"
+        
+        Write-Output "##vso[task.setvariable variable=PrimaryRegion]$PrimaryRegion"
+        Write-Output "##vso[task.setvariable variable=PrimaryRegion;isOutput=true]$PrimaryRegion"
+        Write-Output "Added VSTS variable 'PrimaryRegion' with value '$PrimaryRegion'"
+
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Create Management Groups'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Management/mgmtGroups.json'
+      overrideParameters: '-rootmanagementgroup $(MGRootParentID) -topLevelManagementGroupPrefix $(EnterpriseScaleCompanyPrefix)-$(MGCountryCode)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-MgmtGroup-$(SourceDateRev)'
+      deploymentOutputs: 'MGCreationOutputs'
+  - task: PowerShell@2
+    name: 'GetMGCreationOutputs'
+    displayName: 'Get Management Groups Output'
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)\Code\Scripts\Outputs.ps1'
+      arguments: '-armOutputString ''$(MGCreationOutputs)'' -VariableGroupID $(VariableGroupID) -OverwriteVariable'
+
+# Policies
+- job: deploy_policies
+  dependsOn: deploy_mgmtGroups
+  displayName: 'Deploy Policies'
+  variables:
+    VariableGroupID: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.VariableGroupID'] ]
+    SourceDateRev: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.SourceDateRev'] ]
+    Output_platformESManagementGroupName: $[ dependencies.deploy_mgmtGroups.outputs['GetMGCreationOutputs.Output_platformESManagementGroupName'] ]
+    Output_landingZonesESManagementGroupName: $[ dependencies.deploy_mgmtGroups.outputs['GetMGCreationOutputs.Output_landingZonesESManagementGroupName'] ]
+  steps:
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Foundation Policy Deploy'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Authorization/Foundation/FoundationPolicies.json'
+      overrideParameters: '-topLevelManagementGroupName $(MGRootParentID)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-FoundationPolicy-$(SourceDateRev)'
+      deploymentOutputs: 'MGFoundationPolicyCreationOutputs'
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Platform Policy Deploy'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Authorization/Platform/PlatformPolicies.json'
+      overrideParameters: '-ManagementGroupName $(Output_platformESManagementGroupName)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-PlatformPolicy-$(SourceDateRev)'
+      deploymentOutputs: 'MGPlatformPolicyCreationOutputs'
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'LandingZone Policy Deploy'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Authorization/LandingZone/LandingZonePolicies.json'
+      overrideParameters: '-ManagementGroupName $(Output_landingZonesESManagementGroupName)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-LZPolicy-$(SourceDateRev)'
+      deploymentOutputs: 'MGLandingZonePolicyCreationOutputs'
+
+# Connectivity Subscription
+- job: deploy_conSub
+  timeoutInMinutes: 200
+  dependsOn: 
+  - deploy_mgmtGroups
+  - deploy_policies
+  displayName: 'Deploy Connectivity Subscription'
+  variables:
+    VariableGroupID: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.VariableGroupID'] ]
+    SourceDateRev: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.SourceDateRev'] ]
+    PrimaryRegion: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.PrimaryRegion'] ]
+    Output_platformMgsNames: $[ dependencies.deploy_mgmtGroups.outputs['GetMGCreationOutputs.Output_platformMgsNames'] ]
+
+  steps:
+  - script: echo $(System.AccessToken) | az devops login
+    env:
+      AZURE_DEVOPS_CLI_PAT: $(System.AccessToken)
+    displayName: 'Login Azure DevOps Extension'
+  - script: az devops configure --defaults organization="$(System.CollectionUri)" project="$(System.TeamProject)" --use-git-aliases true
+    displayName: 'Set default Azure DevOps organization and project'
+  - task: PowerShell@2
+    name: 'GetConnectivityMgmtGroupName'
+    displayName: 'Get Connectivity Group Name'
+    inputs:
+      targetType: 'inline'
+      script: |
+        $GroupName = '$(Output_platformMgsNames)'.split(' ')[1]
+        # Output TempOutput_ConnectivityManagementGroupName for use
+        Write-Output "##vso[task.setvariable variable=TempOutput_ConnectivityManagementGroupName]$GroupName"
+        Write-Output "##vso[task.setvariable variable=TempOutput_ConnectivityManagementGroupName;isOutput=true]$GroupName"
+        Write-Output "Added VSTS variable 'TempOutput_ConnectivityManagementGroupName' with value '$GroupName'"    
+  - task: PowerShell@2
+    name: 'AddressSpaceLookup'
+    displayName: 'Get and Allocate Address Spaces'
+    enabled: false
+    inputs:
+      targetType: 'inline'
+      script: |
+        # Register Function URI
+        $uri = '$(IPAMRootURL)RegisterAddressSpace$(IPAMFunctionHostKey)'
+
+        function New-AddressSpaceRequest {
+          param(
+            [string]$Hosts = "$(DefaultCIDRHostCount)"
+          )
+          # Set Body to query AddressSpaces for specific Region
+          $Body = @{
+            "InputObject" = @{
+              "Region" = "$(ShortLocationName)",
+              "Hosts" = "$Hosts"
+            }
+          } | ConvertTo-Json
+
+          # Set Invoke-RestMethod Parameters
+          $params = @{
+            ContentType = 'application/json'
+            Method      = 'Post'
+            URI         = $uri
+            Body        = $Body
+          }
+          $AddressSpaceRequest = (Invoke-RestMethod @params).NetworkAddress
+          return $AddressSpaceRequest
+        }
+
+        $AddressSpaceArray = @(
+          @{
+            'Name'='PM-CONNECTIVITY-VNET'
+            'CIDR'="$(New-AddressSpaceRequest)"
+          },
+          @{
+            'Name'='PM-CONNECTIVITY-VPN'
+            'CIDR'="$(New-AddressSpaceRequest -Hosts $(VPNCIDRHostCount))"
+          },
+          @{
+            'Name'='PM-CONNECTIVITY-VHUB'
+            'CIDR'="$(New-AddressSpaceRequest)"
+          },
+          @{
+            'Name'='PM-MANAGEMENT'
+            'CIDR'="$(New-AddressSpaceRequest)"
+          },
+          @{
+            'Name'='PM-IDENTITY'
+            'CIDR'="$(New-AddressSpaceRequest)"
+          },
+          @{
+            'Name'='LZ-PROD'
+            'CIDR'="$(New-AddressSpaceRequest)"
+          }, 
+          @{
+            'Name'='LZ-NP-DEV'
+            'CIDR'="$(New-AddressSpaceRequest)"
+          },
+          @{
+            'Name'='LZ-NP-TEST'
+            'CIDR'="$(New-AddressSpaceRequest)"
+          },         
+          @{
+            'Name'='LZ-AVD'
+            'CIDR'="$(New-AddressSpaceRequest)"
+          },
+          @{
+            'Name'='LZ_STAGE'
+            'CIDR'="$(New-AddressSpaceRequest)"
+          },
+          @{
+            'Name'='RD'
+            'CIDR'="$(New-AddressSpaceRequest)"
+          }
+        ) | ConvertTo-Json -Compress
+
+        # Output AddressSpaceArray for use in Deployment Names
+        Write-Output "##vso[task.setvariable variable=AddressSpaceArray]$AddressSpaceArray"
+        Write-Output "##vso[task.setvariable variable=AddressSpaceArray;isOutput=true]$AddressSpaceArray"
+        Write-Output "Added VSTS variable 'AddressSpaceArray' with value '$AddressSpaceArray'"
+  - ${{ if eq(parameters.VariableGroupSelection, 'AustraliaEast') }}:
+    - task: PowerShell@2
+      name: 'AddressSpaceLookup'
+      displayName: 'Get and Allocate Address Spaces -AUS'
+      enabled: true
+      inputs:
+        targetType: 'inline'
+        script: |
+          $AddressSpaceArray = '[{"Name":"PM-CONNECTIVITY-VNET","CIDR":"10.240.0.0/21"},{"Name":"PM-CONNECTIVITY-VPN","CIDR":"10.240.8.0/21"},{"Name":"PM-CONNECTIVITY-VHUB","CIDR":"10.240.16.0/21"},{"Name":"PM-MANAGEMENT","CIDR":"10.240.24.0/21"},{"Name":"PM-IDENTITY","CIDR":"10.240.32.0/21"},{"Name":"LZ-PROD","CIDR":"10.240.40.0/21"},{"Name":"LZ-NP-DEV","CIDR":"10.240.56.0/21"},{"Name":"LZ-NP-TEST","CIDR":"10.240.64.0/21"},{"Name":"LZ-AVD","CIDR":"10.240.72.0/21"},{"Name":"LZ_STAGE","CIDR":"10.240.80.0/21"},{"Name":"RD","CIDR":"10.240.88.0/21"}]'
+          # Output AddressSpaceArray for use in Deployment Names
+          Write-Output "##vso[task.setvariable variable=AddressSpaceArray]$AddressSpaceArray"
+          Write-Output "##vso[task.setvariable variable=AddressSpaceArray;isOutput=true]$AddressSpaceArray"
+          Write-Output "Added VSTS variable 'AddressSpaceArray' with value '$AddressSpaceArray'"
+  - ${{ if eq(parameters.VariableGroupSelection, 'EastUS2') }}:
+    - task: PowerShell@2
+      name: 'AddressSpaceLookup'
+      displayName: 'Get and Allocate Address Spaces -EUS'
+      enabled: true
+      inputs:
+        targetType: 'inline'
+        script: |
+          $AddressSpaceArray = '[{"Name":"PM-CONNECTIVITY-VNET","CIDR":"10.241.0.0/21"},{"Name":"PM-CONNECTIVITY-VPN","CIDR":"10.241.8.0/21"},{"Name":"PM-CONNECTIVITY-VHUB","CIDR":"10.241.16.0/21"},{"Name":"PM-MANAGEMENT","CIDR":"10.241.24.0/21"},{"Name":"PM-IDENTITY","CIDR":"10.241.32.0/21"},{"Name":"LZ-PROD","CIDR":"10.241.40.0/21"},{"Name":"LZ-NP-DEV","CIDR":"10.241.56.0/21"},{"Name":"LZ-NP-TEST","CIDR":"10.241.64.0/21"},{"Name":"LZ-AVD","CIDR":"10.241.72.0/21"},{"Name":"LZ_STAGE","CIDR":"10.241.80.0/21"},{"Name":"RD","CIDR":"10.241.88.0/21"}]'
+          # Output AddressSpaceArray for use in Deployment Names
+          Write-Output "##vso[task.setvariable variable=AddressSpaceArray]$AddressSpaceArray"
+          Write-Output "##vso[task.setvariable variable=AddressSpaceArray;isOutput=true]$AddressSpaceArray"
+          Write-Output "Added VSTS variable 'AddressSpaceArray' with value '$AddressSpaceArray'"
+  
+  - task: PowerShell@2
+    name: 'SubnetIpGroups'
+    displayName: 'Create IP Groups Variable for Subnet IPs'
+    enabled: true
+    inputs:
+      targetType: 'inline'
+      script: |       
+        # Get all address spaces for an 'All' IP Group
+        $uri = '$(IPAMRootURL)GetAddressSpace$(IPAMFunctionHostKey)'
+        $params = @{
+          ContentType = 'application/json'
+          Method      = 'Get'
+          URI         = $uri
+        }
+        $GlobalAddressSpaceRequest = Invoke-RestMethod @params
+        $GlobalAddressSpace = $GlobalAddressSpaceRequest.NetworkAddress | ConvertTo-Json -Compress
+
+        # Build SubnetIpGroup Object Array
+        $SubnetIpGroup = @()
+        $Regions = $GlobalAddressSpaceRequest.Region | sort | Get-Unique
+        foreach ($Region in $Regions){
+            $GroupName = "$(EnterpriseScaleCompanyPrefix)-IP-$Region-C-001"
+            $IpList = ($GlobalAddressSpaceRequest | ? {$_.Region -eq $Region}).NetworkAddress
+            $GroupInfo = [pscustomobject]@{Group=$GroupName;ips=$IpList}
+            $SubnetIpGroup+=$GroupInfo
+        }
+        $SubnetIpGroup = $SubnetIpGroup | ConvertTo-Json -Compress
+
+        # Output SubnetIpGroup and GlobalAddressSpace for use in Connectivity Deployment
+        Write-Output "##vso[task.setvariable variable=subnetIPGroup]$SubnetIpGroup"
+        Write-Output "##vso[task.setvariable variable=subnetIPGroup;isOutput=true]$SubnetIpGroup"
+        Write-Output "Added VSTS variable 'SubnetIpGroup' with value '$SubnetIpGroup'"
+        Write-Output "##vso[task.setvariable variable=GlobalAddressSpace]$GlobalAddressSpace"
+        Write-Output "##vso[task.setvariable variable=GlobalAddressSpace;isOutput=true]$GlobalAddressSpace"
+        Write-Output "Added VSTS variable 'GlobalAddressSpace' with value '$GlobalAddressSpace'"
+
+  - task: PowerShell@2
+    name: 'P2SCertificate'
+    displayName: 'Get Public Key Data from Certificate for P2S Gateway'
+    enabled: true
+    inputs:
+      targetType: 'inline'
+      script: |
+        #Get Certificate Data
+        $CertificateFile = Get-Content 'Code/es/ARM Templates/Microsoft.Subscription/GHDRCA-2016.cer'
+        $P2SVpnCertificateData = $CertificateFile[1..$($CertificateFile.count - 2)] -join ''
+
+        # Output P2SVpnCertificateData for use in Connectivity Deployment
+        Write-Output "##vso[task.setvariable variable=P2SVpnCertificateData]$P2SVpnCertificateData"
+        Write-Output "##vso[task.setvariable variable=P2SVpnCertificateData;isOutput=true]$P2SVpnCertificateData"
+        Write-Output "Added VSTS variable 'P2SVpnCertificateData' with value '$P2SVpnCertificateData'"
+
+  - task: AzureResourceManagerTemplateDeployment@3
+    enabled: true
+    displayName: 'Create Connectivity Subscription'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Subscription/ConnectivitySubscriptionWithTag.json'
+      overrideParameters: '-enterpriseScaleCompanyPrefix $(EnterpriseScaleCompanyPrefix) -targetManagementGroup $(TempOutput_ConnectivityManagementGroupName) -shortLocationName $(ShortLocationName) -billingAccountId $(billingaccountid) -enrollmentAccountId $(EnrollmentAccountId) -primaryRegion $(PrimaryRegion) -PrivateDNSArray $(PrivateDNSArray) -AddressSpaceArray $(AddressSpaceArray) -vNetDNSServers $(DNSServers) -deployExpressRoute $(DeployExpressRoute) -primaryVWANResourceID $(primaryVWANResourceID) -s2SVpnSiteLinks $(s2SVpnSiteLinks) -SubnetIpGroup $(SubnetIpGroup) -GlobalAddressSpace $(GlobalAddressSpace) -P2SvpnGatewayScaleUnit $(P2SvpnGatewayScaleUnit) -P2SVpnCertificateData $(P2SVpnCertificateData)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-ConnectivitySub-$(SourceDateRev)'
+      deploymentOutputs: 'SubConnectivityCreationOutputs'
+  - task: PowerShell@2
+    name: 'GetConnectivitySubCreationOutputs'
+    displayName: 'Get Connectivity Subscription Output'
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)\Code\Scripts\Outputs.ps1'
+      arguments: '-armOutputString ''$(SubConnectivityCreationOutputs)'' -VariableGroupID $(VariableGroupID) -OverwriteVariable -AdditionalIdentifier "PM-CONNECTIVITY"'
+  - task: PowerShell@2
+    name: 'UpdateGeneralVG'
+    displayName: 'Update General Variable Group'
+    inputs:
+      targetType: 'inline'
+      script: |
+        If ([System.Convert]::ToBoolean('$(PrimaryRegion)')) {
+          Write-Output "Primary Region - True - Updating VG..."
+
+          $GeneralVG = az pipelines variable-group list --group-name 'ES-General' --only-show-errors | ConvertFrom-Json
+          $CurrentVariables = az pipelines variable-group variable list --group-id $GeneralVG.id | ConvertFrom-json
+
+          If ("MainRegionConnectivityRGID" -in  $CurrentVariables.Psobject.Members.name) {
+            az pipelines variable-group variable update --group-id $GeneralVG.id --name MainRegionConnectivityRGID --value '$(Output_PM-CONNECTIVITY_ResourceGroupId)' --only-show-errors
+          } else {
+            az pipelines variable-group variable create --group-id $GeneralVG.id --name MainRegionConnectivityRGID --value '$(Output_PM-CONNECTIVITY_ResourceGroupId)' --only-show-errors
+          }
+
+          If ("primaryVWANResourceID" -in  $CurrentVariables.Psobject.Members.name) {
+            az pipelines variable-group variable update --group-id $GeneralVG.id --name primaryVWANResourceID --value '$(Output_PM-CONNECTIVITY_primaryVWANResourceID)' --only-show-errors
+          } else {
+            az pipelines variable-group variable create --group-id $GeneralVG.id --name primaryVWANResourceID --value '$(Output_PM-CONNECTIVITY_primaryVWANResourceID)' --only-show-errors
+          }
+
+          # Output MainRegionConnectivityRGID and primaryVWANResourceID to replace variable from VG
+          Write-Output "##vso[task.setvariable variable=MainRegionConnectivityRGID]$(Output_PM-CONNECTIVITY_ResourceGroupId)"
+          Write-Output "##vso[task.setvariable variable=MainRegionConnectivityRGID;isOutput=true]$(Output_PM-CONNECTIVITY_ResourceGroupId)"
+          Write-Output "Added VSTS variable 'MainRegionConnectivityRGID' with value '$(Output_PM-CONNECTIVITY_ResourceGroupId)'"
+
+          Write-Output "##vso[task.setvariable variable=primaryVWANResourceID]$(Output_PM-CONNECTIVITY_primaryVWANResourceID)"
+          Write-Output "##vso[task.setvariable variable=primaryVWANResourceID;isOutput=true]$(Output_PM-CONNECTIVITY_primaryVWANResourceID)"
+          Write-Output "Added VSTS variable 'primaryVWANResourceID' with value '$(Output_PM-CONNECTIVITY_primaryVWANResourceID)'"
+
+        } else {
+
+          Write-Output "Primary Region - False - No VG update needed..."
+          # Output MainRegionConnectivityRGID and primaryVWANResourceID from VG
+          Write-Output "##vso[task.setvariable variable=MainRegionConnectivityRGID]$(MainRegionConnectivityRGID)"
+          Write-Output "##vso[task.setvariable variable=MainRegionConnectivityRGID;isOutput=true]$(MainRegionConnectivityRGID)"
+          Write-Output "Added VSTS variable 'MainRegionConnectivityRGID' with value '$(MainRegionConnectivityRGID)'"
+
+          Write-Output "##vso[task.setvariable variable=primaryVWANResourceID]$(primaryVWANResourceID)"
+          Write-Output "##vso[task.setvariable variable=primaryVWANResourceID;isOutput=true]$(primaryVWANResourceID)"
+          Write-Output "Added VSTS variable 'primaryVWANResourceID' with value '$(primaryVWANResourceID)'"
+        }
+
+  - task: AzureCLI@2
+    name: 'RegisterProviders'
+    displayName: 'Register Providers'
+    inputs:
+      azureSubscription: 'GHD Root Management Group'
+      scriptType: 'pscore'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        # Register Provider so this Sub
+        "$(ResourceProvidersToRegister)".Split(" ") | ForEach {
+            Write-Output "Registering $_"
+            az provider register --namespace $_ --subscription $(Output_PM-CONNECTIVITY_subscriptionId)
+        }
+
+# Other Subscription
+- job: matrixgenerator
+  dependsOn: 
+  - deploy_conSub
+  - deploy_mgmtGroups
+  displayName: 'Prepare Variables for Other Subscriptions'
+  variables:
+    Output_platformMgsNames: $[ dependencies.deploy_mgmtGroups.outputs['GetMGCreationOutputs.Output_platformMgsNames'] ]
+    Output_landingZonesMgsNames: $[ dependencies.deploy_mgmtGroups.outputs['GetMGCreationOutputs.Output_landingZonesMgsNames'] ]
+    Output_researchDevelopmentESManagementGroupName: $[ dependencies.deploy_mgmtGroups.outputs['GetMGCreationOutputs.Output_researchDevelopmentESManagementGroupName'] ]
+    AddressSpaceArray: $[ dependencies.deploy_conSub.outputs['AddressSpaceLookup.AddressSpaceArray'] ]
+  steps:
+  - task: PowerShell@2
+    name: mtrx
+    displayName: 'Create Subscription Step Matrix'
+    inputs:
+      targetType: 'inline'
+      script: |
+        $MatrixObject = @{
+          PM_MANAGEMENT = @{
+            Matrix_subscriptionAliasNameSufix='PM-MANAGEMENT'
+            Matrix_targetManagementGroup="$(Output_platformMgsNames)".Split(" ")[0]
+            Matrix_environment='Management'
+            Matrix_AddressSpace=('$(AddressSpaceArray)' | ConvertFrom-Json)[3].CIDR
+            Matrix_MgmtCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[3].CIDR
+            Matrix_IdCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[4].CIDR
+          }
+          PM_IDENTITY = @{
+            Matrix_subscriptionAliasNameSufix='PM-IDENTITY'
+            Matrix_targetManagementGroup="$(Output_platformMgsNames)".Split(" ")[2]
+            Matrix_environment='Identity'
+            Matrix_AddressSpace=('$(AddressSpaceArray)' | ConvertFrom-Json)[4].CIDR
+            Matrix_MgmtCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[3].CIDR
+            Matrix_IdCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[4].CIDR
+          }
+          LZ_PROD = @{
+            Matrix_subscriptionAliasNameSufix='LZ-PROD-01'
+            Matrix_targetManagementGroup="$(Output_landingZonesMgsNames)".Split(" ")[0]
+            Matrix_environment='Production'
+            Matrix_AddressSpace=('$(AddressSpaceArray)' | ConvertFrom-Json)[5].CIDR
+            Matrix_MgmtCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[3].CIDR
+            Matrix_IdCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[4].CIDR
+          }
+          LZ_NP_DEV = @{
+            Matrix_subscriptionAliasNameSufix='LZ-NP-DEV-01'
+            Matrix_targetManagementGroup="$(Output_landingZonesMgsNames)".Split(" ")[1] 
+            Matrix_environment='Development'
+            Matrix_AddressSpace=('$(AddressSpaceArray)' | ConvertFrom-Json)[6].CIDR
+            Matrix_MgmtCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[3].CIDR
+            Matrix_IdCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[4].CIDR
+          }
+          LZ_NP_TEST = @{
+            Matrix_subscriptionAliasNameSufix='LZ-NP-TEST-01'
+            Matrix_targetManagementGroup="$(Output_landingZonesMgsNames)".Split(" ")[1] 
+            Matrix_environment='Test'
+            Matrix_AddressSpace=('$(AddressSpaceArray)' | ConvertFrom-Json)[7].CIDR
+            Matrix_MgmtCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[3].CIDR
+            Matrix_IdCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[4].CIDR
+          }
+          LZ_AVD = @{
+            Matrix_subscriptionAliasNameSufix='LZ-AVD-01'
+            Matrix_targetManagementGroup="$(Output_landingZonesMgsNames)".Split(" ")[3]
+            Matrix_environment='AzureVirtualDesktop'
+            Matrix_AddressSpace=('$(AddressSpaceArray)' | ConvertFrom-Json)[8].CIDR
+            Matrix_MgmtCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[3].CIDR
+            Matrix_IdCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[4].CIDR
+          }          
+          LZ_STAGE = @{
+            Matrix_subscriptionAliasNameSufix='LZ-STAGE-01'
+            Matrix_targetManagementGroup="$(Output_landingZonesMgsNames)".Split(" ")[2]
+            Matrix_environment='Staging'
+            Matrix_AddressSpace=('$(AddressSpaceArray)' | ConvertFrom-Json)[9].CIDR
+            Matrix_MgmtCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[3].CIDR
+            Matrix_IdCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[4].CIDR
+          }
+          RD = @{
+            Matrix_subscriptionAliasNameSufix='R-RD-01'
+            Matrix_targetManagementGroup="$(Output_researchDevelopmentESManagementGroupName)"
+            Matrix_environment='ReseachDevelopment'
+            Matrix_AddressSpace=('$(AddressSpaceArray)' | ConvertFrom-Json)[10].CIDR
+            Matrix_MgmtCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[3].CIDR
+            Matrix_IdCIDR=('$(AddressSpaceArray)' | ConvertFrom-Json)[4].CIDR
+          }
+        }
+        Write-Output  "##vso[task.setVariable variable=legs;isOutput=true]$($MatrixObject | ConvertTo-json -Compress)"
+        $MatrixObject | ConvertTo-json
+
+- job: deploy_otherSubs
+  dependsOn: 
+  - deploy_mgmtGroups
+  - deploy_conSub
+  - matrixgenerator
+  displayName: 'Deploy Subscriptions'
+  variables:
+    VariableGroupID: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.VariableGroupID'] ]
+    SourceDateRev: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.SourceDateRev'] ]
+    Output_PM-CONNECTIVITY_vnetResourceID: $[ dependencies.deploy_conSub.outputs['GetConnectivitySubCreationOutputs.Output_PM-CONNECTIVITY_vnetResourceID'] ]
+    Output_PM-CONNECTIVITY_VHUBResourceID: $[ dependencies.deploy_conSub.outputs['GetConnectivitySubCreationOutputs.Output_PM-CONNECTIVITY_VHUBResourceID'] ]
+    Output_PM-CONNECTIVITY_azureFirewallPrivateIp: $[ dependencies.deploy_conSub.outputs['GetConnectivitySubCreationOutputs.Output_PM-CONNECTIVITY_azureFirewallPrivateIp'] ]
+    MainRegionConnectivityRGID: $[ dependencies.deploy_conSub.outputs['UpdateGeneralVG.MainRegionConnectivityRGID'] ]
+  strategy:
+    matrix: $[ dependencies.matrixgenerator.outputs['mtrx.legs'] ]
+  steps:
+  - script: echo $(System.AccessToken) | az devops login
+    env:
+      AZURE_DEVOPS_CLI_PAT: $(System.AccessToken)
+    displayName: 'Login Azure DevOps Extension'
+  - script: az devops configure --defaults organization="$(System.CollectionUri)" project="$(System.TeamProject)" --use-git-aliases true
+    displayName: 'Set default Azure DevOps organization and project'
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Create $(Matrix_subscriptionAliasNameSufix) Subscription'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Subscription/SubscriptionWithTag.json'
+      overrideParameters: '-enterpriseScaleCompanyPrefix $(EnterpriseScaleCompanyPrefix) -shortLocationName $(ShortLocationName) -subscriptionAliasNameSufix $(Matrix_subscriptionAliasNameSufix) -targetManagementGroup $(Matrix_targetManagementGroup) -billingAccountId $(billingaccountid) -enrollmentAccountId $(EnrollmentAccountId) -PrivateDNSArray $(PrivateDNSArray) -environment $(Matrix_environment) -vNetCidr $(Matrix_AddressSpace) -MgmtCIDR $(Matrix_MgmtCIDR) -IdCIDR $(Matrix_IdCIDR) -ConVnetResourceId $(Output_PM-CONNECTIVITY_vnetResourceID) -ConVHubResourceId $(Output_PM-CONNECTIVITY_VHUBResourceID) -ConAZFirewallIP $(Output_PM-CONNECTIVITY_azureFirewallPrivateIp) -vNetDNSServers $(DNSServers) -GlobalConRGID $(MainRegionConnectivityRGID)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-$(Matrix_subscriptionAliasNameSufix)-$(SourceDateRev)'
+      deploymentOutputs: 'SubCreationOutputs'
+  - task: PowerShell@2
+    name: 'GetSubCreationOutputs'
+    displayName: 'Get $(Matrix_subscriptionAliasNameSufix) Subscription Output'
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)\Code\Scripts\Outputs.ps1'
+      arguments: '-armOutputString ''$(SubCreationOutputs)'' -VariableGroupID $(VariableGroupID) -OverwriteVariable -AdditionalIdentifier $(Matrix_subscriptionAliasNameSufix)'
+  - task: AzureCLI@2
+    name: 'RegisterProviders'
+    displayName: 'Register Providers'
+    inputs:
+      azureSubscription: 'GHD Root Management Group'
+      scriptType: 'pscore'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        # Get SubID for this matrix leg
+        $AdditionalIdentifier = '$(Matrix_subscriptionAliasNameSufix)'
+        $SubID = ((dir env:) | Where-Object {$_.Name -eq $("Output_" + $AdditionalIdentifier + "_subscriptionId")}).value
+        
+        # Register Provider so this Sub
+        "$(ResourceProvidersToRegister)".Split(" ") | ForEach {
+            Write-Output "Registering $_"
+            az provider register --namespace $_ --subscription $SubID
+        }
+
+- job: deploy_Mgmt_LogAnalytics
+  dependsOn: 
+  - deploy_mgmtGroups
+  - deploy_conSub
+  - deploy_otherSubs
+  displayName: 'Deploy Management Log Analytics'
+  variables:
+    VariableGroupID: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.VariableGroupID'] ]
+    SourceDateRev: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.SourceDateRev'] ]
+    vnetResourceID: $[ dependencies.deploy_otherSubs.outputs['PM_MANAGEMENT.GetSubCreationOutputs.Output_PM-MANAGEMENT_vnetResourceID'] ]
+    NSGResourceID: $[ dependencies.deploy_otherSubs.outputs['PM_MANAGEMENT.GetSubCreationOutputs.Output_PM-MANAGEMENT_NSGResourceID'] ]
+    RouteTableResourceID: $[ dependencies.deploy_otherSubs.outputs['PM_MANAGEMENT.GetSubCreationOutputs.Output_PM-MANAGEMENT_RouteTableResourceID'] ]
+    MainRegionConnectivityRGID: $[ dependencies.deploy_conSub.outputs['UpdateGeneralVG.MainRegionConnectivityRGID'] ]
+    PrimaryRegion: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.PrimaryRegion'] ]
+    Output_LZ-AVD-01_subscriptionId: $[ dependencies.deploy_otherSubs.outputs['LZ_AVD.GetSubCreationOutputs.Output_LZ-AVD-01_subscriptionId'] ]
+    Output_LZ-NP-DEV-01_subscriptionId: $[ dependencies.deploy_otherSubs.outputs['LZ_NP_DEV.GetSubCreationOutputs.Output_LZ-NP-DEV-01_subscriptionId'] ]
+    Output_LZ-NP-TEST-01_subscriptionId: $[ dependencies.deploy_otherSubs.outputs['LZ_NP_TEST.GetSubCreationOutputs.Output_LZ-NP-TEST-01_subscriptionId'] ]
+    Output_LZ-PROD-01_subscriptionId: $[ dependencies.deploy_otherSubs.outputs['LZ_PROD.GetSubCreationOutputs.Output_LZ-PROD-01_subscriptionId'] ]
+    Output_LZ-STAGE-01_subscriptionId: $[ dependencies.deploy_otherSubs.outputs['LZ_STAGE.GetSubCreationOutputs.Output_LZ-STAGE-01_subscriptionId'] ]
+    Output_PM-CONNECTIVITY_subscriptionId: $[ dependencies.deploy_conSub.outputs['GetConnectivitySubCreationOutputs.Output_PM-CONNECTIVITY_subscriptionId'] ]
+    Output_PM-IDENTITY_subscriptionId: $[ dependencies.deploy_otherSubs.outputs['PM_IDENTITY.GetSubCreationOutputs.Output_PM-IDENTITY_subscriptionId'] ]
+    Output_PM-MANAGEMENT_subscriptionId: $[ dependencies.deploy_otherSubs.outputs['PM_MANAGEMENT.GetSubCreationOutputs.Output_PM-MANAGEMENT_subscriptionId'] ]
+  steps:
+  - script: echo $(System.AccessToken) | az devops login
+    env:
+      AZURE_DEVOPS_CLI_PAT: $(System.AccessToken)
+    displayName: 'Login Azure DevOps Extension'
+  - script: az devops configure --defaults organization="$(System.CollectionUri)" project="$(System.TeamProject)" --use-git-aliases true
+    displayName: 'Set default Azure DevOps organization and project'
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Deploy Log Analytics on Management Subscription'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.OperationsManagement/logAnalytics.json'
+      overrideParameters: '-enterpriseScaleCompanyPrefix $(EnterpriseScaleCompanyPrefix) -shortLocationName $(ShortLocationName) -environment "Management" -vNetResourceID $(vnetResourceID) -NSGResourceID $(NSGResourceID) -RouteTableResourceID $(RouteTableResourceID) -GlobalConRGID $(MainRegionConnectivityRGID) -primaryRegion $(PrimaryRegion) -primaryAMPLSresourceID $(PrimaryAMPLSResourceID)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-Mgmt-JobAnalytics-$(SourceDateRev)'
+      deploymentOutputs: 'MgmtLogAnalyticsOutputs'
+  - task: PowerShell@2
+    name: 'GetMgmtLogAnalyticsOutputs'
+    displayName: 'Get Management Log Analytics Output'
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)\Code\Scripts\Outputs.ps1'
+      arguments: '-armOutputString ''$(MgmtLogAnalyticsOutputs)'' -VariableGroupID $(VariableGroupID) -OverwriteVariable -AdditionalIdentifier "PM-MANAGEMENT"'
+  - task: PowerShell@2
+    name: 'UpdateGeneralVG'
+    displayName: 'Update General Variable Group'
+    inputs:
+      targetType: 'inline'
+      script: |
+        If ([System.Convert]::ToBoolean('$(PrimaryRegion)')) {
+          Write-Output "Primary Region - True - Updating VG..."
+
+          $GeneralVG = az pipelines variable-group list --group-name 'ES-General' --only-show-errors | ConvertFrom-Json
+          $CurrentVariables = az pipelines variable-group variable list --group-id $GeneralVG.id | ConvertFrom-json
+
+          If ("PrimaryAMPLSResourceID" -in  $CurrentVariables.Psobject.Members.name) {
+            az pipelines variable-group variable update --group-id $GeneralVG.id --name PrimaryAMPLSResourceID --value '$(Output_PM-MANAGEMENT_primaryAMPLSresourceID)' --only-show-errors
+          } else {
+            az pipelines variable-group variable create --group-id $GeneralVG.id --name PrimaryAMPLSResourceID --value '$(Output_PM-MANAGEMENT_primaryAMPLSresourceID)' --only-show-errors
+          }
+
+          # Output PrimaryAMPLSResourceID to replace variable from VG
+          Write-Output "##vso[task.setvariable variable=PrimaryAMPLSResourceID]$(Output_PM-MANAGEMENT_primaryAMPLSresourceID)"
+          Write-Output "##vso[task.setvariable variable=PrimaryAMPLSResourceID;isOutput=true]$(Output_PM-MANAGEMENT_primaryAMPLSresourceID)"
+          Write-Output "Added VSTS variable 'PrimaryAMPLSResourceID' with value '$(Output_PM-MANAGEMENT_primaryAMPLSresourceID)'"
+
+        } else {
+
+          Write-Output "Primary Region - False - No VG update needed..."
+          # Output PrimaryAMPLSResourceID from VG
+          Write-Output "##vso[task.setvariable variable=PrimaryAMPLSResourceID]$(PrimaryAMPLSResourceID)"
+          Write-Output "##vso[task.setvariable variable=PrimaryAMPLSResourceID;isOutput=true]$(PrimaryAMPLSResourceID)"
+          Write-Output "Added VSTS variable 'PrimaryAMPLSResourceID' with value '$(PrimaryAMPLSResourceID)'"
+        }
+  - task: AzureCLI@2
+    name: 'SetSecurityWorkspaceSettings'
+    displayName: 'Set Security Center Workspace'
+    inputs:
+      azureSubscription: 'GHD Root Management Group'
+      scriptType: 'pscore'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        az security workspace-setting create --name 'default' --subscription $(Output_LZ-AVD-01_subscriptionId) --target-workspace $(Output_PM-MANAGEMENT_workspaceID)
+        az security workspace-setting create --name 'default' --subscription $(Output_LZ-NP-DEV-01_subscriptionId) --target-workspace $(Output_PM-MANAGEMENT_workspaceID)
+        az security workspace-setting create --name 'default' --subscription $(Output_LZ-NP-TEST-01_subscriptionId) --target-workspace $(Output_PM-MANAGEMENT_workspaceID)
+        az security workspace-setting create --name 'default' --subscription $(Output_LZ-PROD-01_subscriptionId) --target-workspace $(Output_PM-MANAGEMENT_workspaceID)
+        az security workspace-setting create --name 'default' --subscription $(Output_LZ-STAGE-01_subscriptionId) --target-workspace $(Output_PM-MANAGEMENT_workspaceID)
+        az security workspace-setting create --name 'default' --subscription $(Output_PM-CONNECTIVITY_subscriptionId) --target-workspace $(Output_PM-MANAGEMENT_workspaceID)
+        az security workspace-setting create --name 'default' --subscription $(Output_PM-IDENTITY_subscriptionId) --target-workspace $(Output_PM-MANAGEMENT_workspaceID)
+        az security workspace-setting create --name 'default' --subscription $(Output_PM-MANAGEMENT_subscriptionId) --target-workspace $(Output_PM-MANAGEMENT_workspaceID)
+
+- job: deploy_RD_LogAnalytics
+  dependsOn: 
+  - deploy_mgmtGroups
+  - deploy_otherSubs
+  displayName: 'Deploy R&D Log Analytics'
+  variables:
+    VariableGroupID: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.VariableGroupID'] ]
+    SourceDateRev: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.SourceDateRev'] ]
+    Output_R-RD-01_subscriptionId: $[ dependencies.deploy_otherSubs.outputs['RD.GetSubCreationOutputs.Output_R-RD-01_subscriptionId'] ]
+    vnetResourceID: $[ dependencies.deploy_otherSubs.outputs['RD.GetSubCreationOutputs.Output_R-RD-01_vnetResourceID'] ]
+  steps:
+  - script: echo $(System.AccessToken) | az devops login
+    env:
+      AZURE_DEVOPS_CLI_PAT: $(System.AccessToken)
+    displayName: 'Login Azure DevOps Extension'
+  - script: az devops configure --defaults organization="$(System.CollectionUri)" project="$(System.TeamProject)" --use-git-aliases true
+    displayName: 'Set default Azure DevOps organization and project'
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Deploy Log Analytics on R&D Subscription'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.OperationsManagement/logAnalytics.json'
+      overrideParameters: '-enterpriseScaleCompanyPrefix $(EnterpriseScaleCompanyPrefix) -shortLocationName $(ShortLocationName) -environment "ReseachDevelopment" -vNetResourceID $(vnetResourceID)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-RD-JobAnalytics-$(SourceDateRev)'
+      deploymentOutputs: 'RDLogAnalyticsOutputs'
+  - task: PowerShell@2
+    name: 'GetRDLogAnalyticsOutputs'
+    displayName: 'Get R&D Log Analytics Output'
+    inputs:
+      filePath: '$(System.DefaultWorkingDirectory)\Code\Scripts\Outputs.ps1'
+      arguments: '-armOutputString ''$(RDLogAnalyticsOutputs)'' -VariableGroupID $(VariableGroupID) -OverwriteVariable -AdditionalIdentifier "R-RD-01"'
+  - task: AzureCLI@2
+    name: 'SetSecurityWorkspaceSettings'
+    displayName: 'Set Security Center Workspace'
+    inputs:
+      azureSubscription: 'GHD Root Management Group'
+      scriptType: 'pscore'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        az security workspace-setting create --name 'default' --subscription $(Output_R-RD-01_subscriptionId) --target-workspace $(Output_R-RD-01_workspaceID)
+
+- job: deploy_Policy_Assignments
+  dependsOn:
+  - deploy_policies
+  - deploy_mgmtGroups
+  - deploy_otherSubs
+  - deploy_Mgmt_LogAnalytics
+  - deploy_RD_LogAnalytics
+  displayName: 'Deploy Policy Assignments'
+  variables:
+    VariableGroupID: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.VariableGroupID'] ]
+    SourceDateRev: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.SourceDateRev'] ]
+    Output_platformESManagementGroupName: $[ dependencies.deploy_mgmtGroups.outputs['GetMGCreationOutputs.Output_platformESManagementGroupName'] ]
+    Output_landingZonesESManagementGroupName: $[ dependencies.deploy_mgmtGroups.outputs['GetMGCreationOutputs.Output_landingZonesESManagementGroupName'] ]
+    Output_researchDevelopmentESManagementGroupName: $[ dependencies.deploy_mgmtGroups.outputs['GetMGCreationOutputs.Output_researchDevelopmentESManagementGroupName'] ]
+    Output_PM-MANAGEMENT_workspaceID: $[ dependencies.deploy_Mgmt_LogAnalytics.outputs['GetMgmtLogAnalyticsOutputs.Output_PM-MANAGEMENT_workspaceID'] ]
+    Output_PM-MANAGEMENT_vastorageAccountID: $[ dependencies.deploy_Mgmt_LogAnalytics.outputs['GetMgmtLogAnalyticsOutputs.Output_PM-MANAGEMENT_vastorageAccountID'] ]
+    Output_PM-MANAGEMENT_nsgflowStorageAccountID: $[ dependencies.deploy_Mgmt_LogAnalytics.outputs['GetMgmtLogAnalyticsOutputs.Output_PM-MANAGEMENT_nsgflowStorageAccountID'] ]
+    Output_platformMgsNames: $[ dependencies.deploy_mgmtGroups.outputs['GetMGCreationOutputs.Output_platformMgsNames'] ]
+    Output_topLevelManagementGroupName: $[ dependencies.deploy_mgmtGroups.outputs['GetMGCreationOutputs.Output_topLevelManagementGroupName'] ]
+    Output_R-RD-01_nsgflowStorageAccountID: $[ dependencies.deploy_RD_LogAnalytics.outputs['GetRDLogAnalyticsOutputs.Output_R-RD-01_nsgflowStorageAccountID'] ]
+    Output_R-RD-01_workspaceID: $[ dependencies.deploy_RD_LogAnalytics.outputs['GetRDLogAnalyticsOutputs.Output_R-RD-01_workspaceID'] ]
+    Output_R-RD-01_subscriptionId: $[ dependencies.deploy_otherSubs.outputs['RD.GetSubCreationOutputs.Output_R-RD-01_subscriptionId'] ]
+    PrimaryRegion: $[ dependencies.deploy_mgmtGroups.outputs['CreateVG.PrimaryRegion'] ]
+
+  steps:
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Foundation Core Policy Assignment'
+    condition: eq(variables.PrimaryRegion, 'true')
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Authorization/Foundation/foundationCoreAssignment.json'
+      overrideParameters: '-topLevelManagementGroupName $(MGRootParentID) -location $(AzureRegion) -ResearchDevelopmentMGName $(Output_researchDevelopmentESManagementGroupName) -logAnalyticsWorkspaceResourceId $(Output_PM-MANAGEMENT_workspaceID)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-FoundationCore-PolicyAssignment-$(SourceDateRev)'
+      deploymentOutputs: 'FoundationCorePolicyAssignmentOutputs'
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Foundation Regional Policy Assignment'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Authorization/Foundation/foundationRegionalAssignment.json'
+      overrideParameters: '-topLevelManagementGroupName $(MGRootParentID) -regionalLevelManagementGroupName $(Output_topLevelManagementGroupName) -storageAccountResourceId $(Output_PM-MANAGEMENT_nsgflowStorageAccountID) -ResearchDevelopmentMGName $(Output_researchDevelopmentESManagementGroupName) -logAnalyticsWorkspaceResourceId $(Output_PM-MANAGEMENT_workspaceID) -CountryCode $(MGCountryCode)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-FoundationRegional-PolicyAssignment-$(SourceDateRev)'
+      deploymentOutputs: 'FoundationRegionalPolicyAssignmentOutputs'
+
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'LandingZone Policy Assignment'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Authorization/LandingZone/LandingZoneAssignment.json'
+      overrideParameters: '-topLevelManagementGroupName $(MGRootParentID) -LandingZoneManagementGroupName $(Output_landingZonesESManagementGroupName) -logAnalytics $(Output_PM-MANAGEMENT_workspaceID) -vulnerabilityAssessmentsStorageID $(Output_PM-MANAGEMENT_vastorageAccountID)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-LZ-PolicyAssignment-$(SourceDateRev)'
+      deploymentOutputs: 'LZPolicyAssignmentOutputs'
+
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'R&D Policy Assignment'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Authorization/ResearchDevelopment/ResearchDevelopmentAssignment.json'
+      overrideParameters: '-topLevelManagementGroupName $(MGRootParentID) -RDManagementGroupName $(Output_researchDevelopmentESManagementGroupName) -storageAccountResourceId $(Output_R-RD-01_nsgflowStorageAccountID) -logAnalyticsWorkspaceResourceId $(Output_R-RD-01_workspaceID)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-RD-PolicyAssignment-$(SourceDateRev)'
+      deploymentOutputs: 'RDPolicyAssignmentOutputs'
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'R&D Policy Exemptions'
+    inputs:
+      deploymentScope: 'Subscription'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      subscriptionId: '$(Output_R-RD-01_subscriptionId)'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Authorization/ResearchDevelopment/SecurityCenterExemptions.json'
+      overrideParameters: '-SubscriptionID $(Output_R-RD-01_subscriptionId)'
+      deploymentMode: 'Incremental'
+  - task: PowerShell@2
+    name: 'GetManagementMgmtGroupName'
+    displayName: 'Get Management Group Name'
+    inputs:
+      targetType: 'inline'
+      script: |
+        $GroupName = '$(Output_platformMgsNames)'.split(' ')[0]
+        # Output TempOutput_ManagementManagementGroupName for use
+        Write-Output "##vso[task.setvariable variable=TempOutput_ManagementManagementGroupName]$GroupName"
+        Write-Output "##vso[task.setvariable variable=TempOutput_ManagementManagementGroupName;isOutput=true]$GroupName"
+        Write-Output "Added VSTS variable 'TempOutput_ManagementManagementGroupName' with value '$GroupName'"
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Management Policy Assignment'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Authorization/Management/ManagementAssignment.json'
+      overrideParameters: '-topLevelManagementGroupName $(MGRootParentID) -PlatformManagementGroupName $(Output_platformESManagementGroupName) -ManagementManagementGroupName $(TempOutput_ManagementManagementGroupName)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-MGMT-PolicyAssignment-$(SourceDateRev)'
+      deploymentOutputs: 'MGMTPolicyAssignmentOutputs'
+
+  - task: PowerShell@2
+    name: 'GetConnectivityMgmtGroupName'
+    displayName: 'Get Connectivity Group Name'
+    inputs:
+      targetType: 'inline'
+      script: |
+        $GroupName = '$(Output_platformMgsNames)'.split(' ')[1]
+        # Output TempOutput_ConnectivityManagementGroupName for use
+        Write-Output "##vso[task.setvariable variable=TempOutput_ConnectivityManagementGroupName]$GroupName"
+        Write-Output "##vso[task.setvariable variable=TempOutput_ConnectivityManagementGroupName;isOutput=true]$GroupName"
+        Write-Output "Added VSTS variable 'TempOutput_ConnectivityManagementGroupName' with value '$GroupName'"
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Connectivity Policy Assignment'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Authorization/Connectivity/ConnectivityAssignment.json'
+      overrideParameters: '-PlatformManagementGroupName $(Output_platformESManagementGroupName) -ConnectivityManagementGroupName $(TempOutput_ConnectivityManagementGroupName)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-CON-PolicyAssignment-$(SourceDateRev)'
+      deploymentOutputs: 'CONPolicyAssignmentOutputs'
+
+  - task: PowerShell@2
+    name: 'GetIdentityMgmtGroupName'
+    displayName: 'Get Identity Group Name'
+    inputs:
+      targetType: 'inline'
+      script: |
+        $GroupName = '$(Output_platformMgsNames)'.split(' ')[2]
+        # Output TempOutput_IdentityManagementGroupName for use
+        Write-Output "##vso[task.setvariable variable=TempOutput_IdentityManagementGroupName]$GroupName"
+        Write-Output "##vso[task.setvariable variable=TempOutput_IdentityManagementGroupName;isOutput=true]$GroupName"
+        Write-Output "Added VSTS variable 'TempOutput_IdentityManagementGroupName' with value '$GroupName'"
+  - task: AzureResourceManagerTemplateDeployment@3
+    displayName: 'Identity Policy Assignment'
+    inputs:
+      deploymentScope: 'Management Group'
+      azureResourceManagerConnection: 'GHD Root Management Group'
+      location: '$(AzureRegion)'
+      templateLocation: 'Linked artifact'
+      csmFile: 'Code/es/ARM Templates/Microsoft.Authorization/Identity/IdentityAssignment.json'
+      overrideParameters: '-topLevelManagementGroupName $(MGRootParentID) -PlatformManagementGroupName $(Output_platformESManagementGroupName) -IdentityManagementGroupName $(TempOutput_IdentityManagementGroupName)'
+      deploymentMode: 'Incremental'
+      deploymentName: 'ES-ID-PolicyAssignment-$(SourceDateRev)'
+      deploymentOutputs: 'IDPolicyAssignmentOutputs'
+
+  - task: AzurePowerShell@5
+    displayName: Run Policy Compliance and Remediation
+    inputs:
+      azureSubscription: 'GHD Root Management Group'
+      ScriptType: 'FilePath'
+      ScriptPath: 'Code/Scripts/PolicyComplianceRemediation.ps1'
+      ScriptArguments: '-ManagementGroup $(Output_topLevelManagementGroupName)'
+      azurePowerShellVersion: 'LatestVersion'
+
+- job: Sentinel
+  condition: succeeded()
+  displayName: 'Sentinel as Code'
+  dependsOn:
+  - deploy_policies
+  - deploy_Policy_Assignments
+  - deploy_mgmtGroups
+  - deploy_conSub
+  - deploy_otherSubs
+  - deploy_Mgmt_LogAnalytics
+  - deploy_RD_LogAnalytics
+
+  variables:
+    Output_PM-MANAGEMENT_subscriptionName: $[ dependencies.deploy_otherSubs.outputs['PM_MANAGEMENT.GetSubCreationOutputs.Output_PM-MANAGEMENT_subscriptionName'] ]
+    Output_PM-MANAGEMENT_monRgName: $[ dependencies.deploy_Mgmt_LogAnalytics.outputs['GetMgmtLogAnalyticsOutputs.Output_PM-MANAGEMENT_monRgName'] ]
+    Output_PM-MANAGEMENT_workspaceID: $[ dependencies.deploy_Mgmt_LogAnalytics.outputs['GetMgmtLogAnalyticsOutputs.Output_PM-MANAGEMENT_workspaceID'] ]
+    Output_PM-MANAGEMENT_workspaceName: $[ dependencies.deploy_Mgmt_LogAnalytics.outputs['GetMgmtLogAnalyticsOutputs.Output_PM-MANAGEMENT_workspaceName'] ]
+
+  steps:
+  - task: AzurePowerShell@5
+    displayName: 'Import Analytics Rule'
+    inputs:
+      azureSubscription: 'GHD Root Management Group'
+      ScriptType: 'InlineScript'
+      Inline: |
+        Install-Module AzSentinel -Scope CurrentUser -Force -AllowClobber
+        Import-Module AzSentinel
+        $ManagementSubName = "$(Output_PM-MANAGEMENT_subscriptionName)"
+        $managementSub = Get-AzSubscription -SubscriptionName $ManagementSubName
+        Set-AzContext -Subscription $managementSub.id
+        $lawName = Get-AzOperationalInsightsWorkspace
+        
+        try {
+        Import-AzSentinelAlertRule -SubscriptionId $managementSub.id -WorkspaceName $lawName.Name -SettingsFile "Code/Scripts/Sentinel/AnalyticsRules/analytics-rules.json"
+        }
+        catch {
+        $ErrorMessage = $_.Exception.Message
+        Write-Error "Rule import failed with message: $ErrorMessage" 
+                      }
+      azurePowerShellVersion: 'LatestVersion'
+      pwsh: true
+  - task: AzurePowerShell@5
+    displayName: 'Import Workbooks'
+    inputs:
+      azureSubscription: 'GHD Root Management Group'
+      ScriptType: 'InlineScript'
+      Inline: |
+        Install-Module AzSentinel -Scope CurrentUser -Force -AllowClobber
+        Import-Module AzSentinel
+        $ManagementSubName = "$(Output_PM-MANAGEMENT_subscriptionName)"
+        $managementSub = Get-AzSubscription -SubscriptionName $ManagementSubName
+        Set-AzContext -Subscription $managementSub.id
+        
+        $WorkbooksFolder = "code/Scripts/Sentinel/Workbooks"
+        $ResourceGroup = "$(Output_PM-MANAGEMENT_monRgName)"
+        $SubscriptionId = $managementSub.id
+        $Workspace = "$(Output_PM-MANAGEMENT_workspaceName)"
+        
+        Write-Host "Folder is: " $WorkbooksFolder
+        $armTemplateFiles = Get-ChildItem -Path $WorkbooksFolder -Filter *.json
+        
+        $workbookSourceId = "$(Output_PM-MANAGEMENT_workspaceID)"
+        Write-Host "workspace resource id is: " $workbookSourceId
+        foreach ($armTemplate in $armTemplateFiles) {
+        try {
+        Write-Host "file is: " $armTemplate
+        New-AzResourceGroupDeployment -ResourceGroupName $ResourceGroup -TemplateFile $armTemplate -WorkbookSourceId $workbookSourceId
+        }
+        catch {
+        $ErrorMessage = $_.Exception.Message
+        Write-Error "Workbook deployment failed with message: $ErrorMessage" 
+                  }
+              }
+      errorActionPreference: 'silentlyContinue'
+      azurePowerShellVersion: 'LatestVersion'
+      pwsh: true
+  - task: AzurePowerShell@5
+    displayName: 'Import Playbooks'
+    inputs:
+      azureSubscription: 'GHD Root Management Group'
+      ScriptType: 'InlineScript'
+      Inline: |
+        Install-Module AzSentinel -Scope CurrentUser -Force -AllowClobber
+        Import-Module AzSentinel
+        $ManagementSubName = "$(Output_PM-MANAGEMENT_subscriptionName)"
+        $managementSub = Get-AzSubscription -SubscriptionName $ManagementSubName
+        Set-AzContext -Subscription $managementSub.id
+        
+        $WorkbooksFolder = "code/Scripts/Sentinel/Workbooks"
+        $ResourceGroup = "$(Output_PM-MANAGEMENT_monRgName)"
+        $SubscriptionId = $managementSub.id
+        $Workspace = "$(Output_PM-MANAGEMENT_workspaceName)"
+
+        Write-Host "Folder is: " $WorkbooksFolder
+        $armTemplateFiles = Get-ChildItem -Path $WorkbooksFolder -Filter *.json
+
+        $workbookSourceId = "$(Output_PM-MANAGEMENT_workspaceID)"
+        Write-Host "workspace resource id is: " $workbookSourceId
+        foreach ($armTemplate in $armTemplateFiles) {
+            try {
+              Write-Host "file is: " $armTemplate
+                New-AzResourceGroupDeployment -ResourceGroupName $ResourceGroup -TemplateFile $armTemplate
+            }
+            catch {
+                $ErrorMessage = $_.Exception.Message
+                Write-Error "Workbook deployment failed with message: $ErrorMessage" 
+            }
+        }
+      azurePowerShellVersion: 'LatestVersion'
+      pwsh: true
