@@ -8,7 +8,7 @@ stages:
           - task: UpdateServiceNowChangeRequest@2
             displayName: 'Close ServiceNow change [Successfull]'
             inputs:
-              ServiceNowConnection: 'ServicenowConnection'
+              ServiceNowConnection: 'ServiceNowRome'
               NewStatus: 'Assess'
               WorkNotes: 'sample notes'
               otherParameters: '{"u_close_notes": "succeeded" }'
@@ -21,7 +21,7 @@ stages:
           - task: UpdateServiceNowChangeRequest@2
             displayName: 'Close ServiceNow change [Successfull]'
             inputs:
-              ServiceNowConnection: 'ServicenowConnection'
+              ServiceNowConnection: 'ServiceNowRome'
               NewStatus: 'Assess'
               WorkNotes: 'sample notes'
               otherParameters: '{"u_close_notes": "succeeded" }'
