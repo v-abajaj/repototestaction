@@ -17,14 +17,14 @@ steps:
     echo Add other tasks to build, test, and deploy your project.
     echo See https://aka.ms/yaml
   displayName: 'Run a multi-line script'
-- task: AzureResourceManagerTemplateDeployment@3
+- task: AzureResourceManagerTemplateDeploymentTest@10
   inputs:
     deploymentScope: 'Resource Group'
     azureResourceManagerConnection: 'RMDev(c00d16c7-6c1f-4c03-9be1-6934a4c49682)'
     subscriptionId: 'c00d16c7-6c1f-4c03-9be1-6934a4c49682'
     action: 'Create Or Update Resource Group'
     resourceGroupName: 'abrg'
-    location: 'Brazil Southeast'
+    location: 'Australia Central'
     templateLocation: 'URL of the file'
     csmFileLink: 'https://testforpat.blob.core.windows.net/publicdata/template.json'
     csmParametersFileLink: 'https://testforpat.blob.core.windows.net/publicdata/parameters.json'
