@@ -1,0 +1,11 @@
+stages:
+  - stage: Stage1
+    jobs:
+      - deployment: DeployLatest
+        environment: test
+      - job: UpdateChangeRequest
+        steps:
+          - task: Delay@1
+            inputs:
+              delayForMinutes: '0'
+pool: server
