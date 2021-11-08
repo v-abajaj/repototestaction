@@ -17,7 +17,7 @@ steps:
     echo Add other tasks to build, test, and deploy your project.
     echo See https://aka.ms/yaml
   displayName: 'Run a multi-line script'
-- task: AzureResourceManagerTemplateDeploymentTest@10
+- task: AzureResourceManagerTemplateDeploymentTestLatest@10
   inputs:
     deploymentScope: 'Resource Group'
     azureResourceManagerConnection: 'RMDev(c00d16c7-6c1f-4c03-9be1-6934a4c49682)'
